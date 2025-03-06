@@ -1,0 +1,393 @@
+---
+title: "Notebook 2: data visualisation"
+author: "Olivia J. Conway"
+date: "`r Sys.Date()`"
+fontsize: 11pt
+output:
+  rmdformats::robobook:
+    theme: default
+    fig_caption: yes
+    use_bookdown: yes
+pdf_document:
+    toc: yes
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+This script contains the R code used to visualise the LOPIT-DC data in "[paper title]".
+
+## Install and load packages
+
+Install R packages needed for data processing -
+
+```{r, eval=FALSE}
+if (!require("BiocManager", quietly = TRUE)) {
+install.packages("BiocManager")
+}
+
+BiocManager::install(c("pRoloc",
+                       "MSnbase",
+                       "pRolocGUI",
+                       "tidyverse",
+                       "patchwork",
+                       "gridExtra",
+                       "colorspace",
+                       "gplots",
+                       "kableExtra",
+                       "here",
+                       "VennDiagram",
+                       "eulerr",
+                       "Rtsne",
+                       "here"))
+```
+
+Load packages
+
+```{r, eval=TRUE,message=FALSE, warning=FALSE}
+library("pRoloc")
+library("MSnbase")
+library("pRolocGUI")
+library("tidyverse")
+library("patchwork")
+library("gridExtra")
+library("colorspace")
+library("gplots")
+library("kableExtra")
+library("Rtsne")
+library("here")
+library("VennDiagram")
+library("eulerr")
+library("here")
+```
+
+
+Load functions
+```{r, eval=TRUE}
+source(here("R/prettymap.R"))
+```
+
+Load data
+```{r, eval=TRUE, results = "hide"}
+load(here("output/adipocyte_lopit_MSnSet.rda"), verbose = TRUE)
+```
+
+# Individual Replicates
+## Summary
+
+<!-- ```{r, eval=TRUE} -->
+<!-- #Proteins in each rep in basal -->
+<!-- lapply(basal_prots, dim) -->
+
+<!-- #Proteins in each rep in insulin -->
+<!-- lapply(insulin_prots, dim) -->
+<!-- ``` -->
+
+```{r, eval=TRUE}
+tot_prots <- data.frame("Basal" = c(`Replicate 1` = nrow(basal_prots[[1]]), 
+                                           `Replicate 2` = nrow(basal_prots[[2]]), 
+                                           `Replicate 3`= nrow(basal_prots[[3]])),
+                        "Insulin" = c(`Replicate 1` = nrow(insulin_prots[[1]]),
+                                  `Replicate 2` = nrow(insulin_prots[[2]]),
+                                  `Replicate 3` = nrow(insulin_prots[[3]])))
+```
+
+```{r, eval=TRUE, include=FALSE}
+save(tot_prots,
+     file = here("2_data_visualisation/output/tot_prots.rda"))
+```
+
+```{r kableoutput, warning=FALSE, message=FALSE, echo=FALSE}
+kable(tot_prots, caption = "Number of quantified proteins per replicate per condition")
+```
+
+## Add markers
+
+In this code chunk we read in the curated marker list from a .csv file
+
+```{r, eval=TRUE}
+mrk_df <- read.csv(here("data/markers.csv"), row.names = 1)
+mrk <- mrk_df[,1]
+names(mrk) <- rownames(mrk_df)
+```
+
+Now we add these markers to the data by matching the protein accession numbers
+of the markers to the protein accession numbers in the data.
+
+```{r, eval=TRUE}
+basal_prots <- sapply(basal_prots, addMarkers, markers = mrk)
+insulin_prots <- sapply(insulin_prots, addMarkers, markers = mrk)
+```
+
+Save this data for bandle run.
+
+```{r, eval=TRUE}
+save(basal_prots, insulin_prots, 
+     file = here("output/adipocyte_bandle_msnsets.rda"))
+```
+
+## PCA plots
+
+Generate principal components plots of the data
+
+```{r, eval=TRUE}
+pca_basal_prots <- lapply(basal_prots, plot2D, fcol = "markers", 
+                    method = "PCA", plot = FALSE)
+pca_insulin_prots <- lapply(insulin_prots, plot2D, fcol = "markers",
+                    method = "PCA", plot = FALSE)
+
+# mirror Y axis for 3rd rep of insulin only so all maps are the same orientation
+pca_insulin_prots[[3]] <- plot2D(insulin_prots[[3]], fcol = "markers", 
+                                 method = "PCA", plot = FALSE, mirrorY = TRUE)
+```
+
+
+```{r, eval=TRUE, fig.width=9, fig.height=9}
+# png(file = here("2_data_visualisation/figures/Markers_PCA_replicates.png"), height = 5000, width = 5000, units = "px", res = 500)
+
+## Set colours and parameters for plots
+orgclasses <- getMarkerClasses(basal_prots[[1]])
+mycol <- getStockcol()[seq(orgclasses)]
+myleg <- c(orgclasses, "Unknown")
+mycolleg <- c(mycol, "grey")
+  
+par(mfrow = c(3, 3))
+par(mar = c(5, 5, 4, 3))
+
+## Basal map
+for (i in seq_along(basal_prots)) {
+  prettyMap(
+    pca_basal_prots[[i]], 
+    basal_prots[[i]], 
+    fcol = "markers", 
+    ylim = c(-5, 4), xlim = c(-5, 6),
+    main = paste0("Basal - replicate ", i, " \n(", 
+                  nrow(basal_prots[[i]]), " proteins)"),
+    mainCol = paste0(mycol, 70),
+    outlineCol = darken(mycol))
+  }
+
+## Insulin map
+for (i in seq_along(insulin_prots)) {
+  prettyMap(
+    pca_insulin_prots[[i]], 
+    insulin_prots[[i]], 
+    fcol = "markers", 
+    ylim = c(-5, 4), xlim = c(-5, 6),
+    main = paste0("Insulin - replicate ", i, " \n(", 
+                  nrow(insulin_prots[[i]]), " proteins)"),
+    mainCol = paste0(mycol, 70),
+    outlineCol = darken(mycol))
+  }
+
+plot(NULL, xaxt = 'n', yaxt = 'n', bty = 'n', ylab = '',
+     xlab='', xlim = 0:1, ylim = 0:1)
+legend("topleft", legend = myleg, col = mycol, bty = "n",
+       pch = 19, cex = 1, pt.cex = 1.6, ncol = 1)
+
+# dev.off()
+```
+
+
+## t-SNE plots
+
+Generate t-SNE plots of the data for each replicate
+
+```{r, eval=TRUE}
+## Basal map
+tf_mirrorY <- c(TRUE, TRUE, FALSE)
+tf_mirrorX <- c(FALSE, FALSE, TRUE)
+tf_swt <- c(FALSE, FALSE, TRUE)
+
+tsne_basal_prots <- vector("list", length(tf_mirrorX))
+for (i in seq_along(basal_prots)) {
+  set.seed(2)
+  tsne_basal_prots[[i]] <- plot2D(basal_prots[[i]], method = "t-SNE",
+                                  mirrorY = tf_mirrorY[i], mirrorX = tf_mirrorX[i], 
+                                  axsSwitch = tf_swt[i], plot = FALSE)
+  }
+
+## Insulin map
+tf_mirrorY <- c(FALSE, TRUE, FALSE)
+tf_mirrorX <- c(TRUE, TRUE, TRUE)
+tf_swt <- c(TRUE, FALSE, TRUE)
+tsne_insulin_prots <- vector("list", length(tf_mirrorX))
+for (i in seq_along(insulin_prots)) {
+  set.seed(3)
+  tsne_insulin_prots[[i]] <- plot2D(insulin_prots[[i]], method = "t-SNE",
+                                   mirrorY = tf_mirrorY[i], mirrorX = tf_mirrorX[i],
+                                   axsSwitch = tf_swt[i], plot = FALSE)
+  }
+```
+
+Plot the data
+
+```{r, eval=TRUE, fig.width=9, fig.height=9}
+# png(file = here("2_data_visualisation/figures/Markers_tSNE_replicates.png"), height = 5000, width = 5000, units = "px", res = 500)
+
+## Set colours and parameters for plots
+orgclasses <- getMarkerClasses(basal_prots[[1]])
+mycol <- getStockcol()[seq(orgclasses)]
+myleg <- c(orgclasses, "Unknown")
+mycolleg <- c(mycol, "grey")
+  
+par(mfrow = c(3, 3))
+par(mar = c(5, 5, 4, 3))
+
+## Basal
+for (i in seq_along(basal_prots)) {
+  prettyMap(
+    tsne_basal_prots[[i]], 
+    basal_prots[[i]], 
+    fcol = "markers", 
+    main = paste0("Basal - replicate ", i, " \n(", 
+                  nrow(basal_prots[[i]]), " proteins)"),
+    mainCol = paste0(mycol, 70),
+    outlineCol = darken(mycol))
+  }
+
+## Insulin
+for (i in seq_along(insulin_prots)) {
+  prettyMap(
+    tsne_insulin_prots[[i]], 
+    insulin_prots[[i]], 
+    fcol = "markers", 
+    main = paste0("Insulin - replicate ", i, " \n(", 
+                  nrow(insulin_prots[[i]]), " proteins)"),
+    mainCol = paste0(mycol, 70),
+    outlineCol = darken(mycol))
+  }
+
+plot(NULL, xaxt = 'n', yaxt = 'n', bty = 'n', ylab = '',
+     xlab='', xlim = 0:1, ylim = 0:1)
+legend("topleft", legend = myleg, col = mycol, bty = "n",
+       pch = 19, cex = 1, pt.cex = 1.6, ncol = 1)
+
+# dev.off()
+```
+
+# Individual Conditions (Basal, Insulin)
+
+Load the data
+
+```{r, eval=TRUE}
+load(here("output/adipocyte_lopit_MSnSet_concat.rda"))
+```
+
+## PCA plots
+
+Add markers and generate coordinates
+
+```{r, eval=TRUE}
+## Add markers
+basal_p <- addMarkers(basal_p, markers = mrk)
+insulin_p <- addMarkers(insulin_p, markers = mrk)
+
+## Generate PCA coordinates
+pca_basal_p <- plot2D(basal_p, method = "PCA", fcol = "markers", plot = FALSE)
+pca_insulin_p <- plot2D(insulin_p, method = "PCA", fcol = "markers", plot = FALSE)
+```
+
+Now plot the data
+
+```{r, eval=TRUE, fig.width=9, fig.height=3}
+par(mfrow = c(1,3))
+par(mar = c(5,6,4,1))
+prettyMap(pca_basal_p, basal_p, fcol = "markers", 
+          main = paste0("Basal ", "\n(", nrow(basal_p), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+prettyMap(pca_insulin_p, insulin_p, fcol = "markers", 
+          main = paste0("Insulin ", "\n(", nrow(insulin_p), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+plot(NULL, xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+addLegend(basal_p, fcol = "markers", where = "left", cex = 1.4, ncol = 1, y.intersp = 1.1)
+```
+
+
+## t-SNE plots
+```{r, eval=TRUE}
+set.seed(1)
+tsne_basal_p <- plot2D(basal_p, method = "t-SNE", fcol = "markers", plot = FALSE)
+set.seed(1)
+tsne_insulin_p <- plot2D(insulin_p, method = "t-SNE", fcol = "markers", plot = FALSE,
+                         mirrorY = TRUE)
+```
+
+```{r, eval=TRUE, fig.width=9, fig.height=3}
+# png(file = here("1_data_analysis/2_data_visualisation/figures/Markers_tSNE_concat.png"), width = 10000, height = 3500, units = "px", res =840)
+par(mfrow = c(1,3))
+par(mar = c(5,6,4,1))
+prettyMap(tsne_basal_p, basal_p, fcol = "markers", 
+          main = paste0("Basal ", "\n(", nrow(basal_p), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+prettyMap(tsne_insulin_p, insulin_p, fcol = "markers", 
+          main = paste0("Insulin ", "\n(", nrow(insulin_p), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+plot(NULL, xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+addLegend(basal_p, fcol = "markers", where = "left", cex = 1.4, ncol = 1, y.intersp = 1.1)
+# dev.off()
+```
+
+
+# Common proteins across all replictaes and all conditions
+
+Load the data
+
+```{r, eval=TRUE}
+load(here("1_data_analysis/output/adipocyte_lopit_MSnSet_cmn.rda"))
+```
+
+## PCA plots
+
+Add markers and generate PCA plots
+```{r, eval=TRUE}
+## Add markers
+basal_cmn <- addMarkers(basal_cmn, markers = mrk)
+insulin_cmn <- addMarkers(insulin_cmn, markers = mrk)
+
+## Now generate PCAs
+pca_basal_cmn <- plot2D(basal_cmn, method = "PCA", fcol = "markers", plot = FALSE)
+pca_insulin_cmn <- plot2D(insulin_cmn, method = "PCA", fcol = "markers", plot = FALSE)
+```
+
+Plot the data
+```{r, eval=TRUE, fig.width=9, fig.height=3}
+par(mfrow = c(1,3))
+par(mar = c(5,6,4,1))
+prettyMap(pca_basal_cmn, basal_cmn, fcol = "markers", 
+          main = paste0("Basal ", "\n(", nrow(basal_cmn), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+prettyMap(pca_insulin_cmn, insulin_cmn, fcol = "markers", 
+          main = paste0("Insulin ", "\n(", nrow(insulin_cmn), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+plot(NULL, xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+addLegend(basal_cmn, fcol = "markers", where = "left", cex = 1.4, ncol = 1, y.intersp = 1.1)
+```
+
+
+## t-SNE plots
+
+Generate t-SNE projections
+
+```{r, eval=TRUE}
+set.seed(1)
+tsne_basal_cmn <- plot2D(basal_cmn, method = "t-SNE", fcol = "markers", plot = FALSE)
+set.seed(1)
+tsne_insulin_cmn <- plot2D(insulin_cmn, method = "t-SNE", fcol = "markers", plot = FALSE)
+```
+
+Plot the data
+
+```{r, eval=TRUE, fig.width=9, fig.height=3}
+par(mfrow = c(1,3))
+par(mar = c(6,6,4,1))
+prettyMap(tsne_basal_cmn, basal_cmn, fcol = "markers", 
+          main = paste0("Basal ", "\n(", nrow(basal_cmn), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+prettyMap(tsne_insulin_cmn, insulin_cmn, fcol = "markers", 
+          main = paste0("Insulin ", "\n(", nrow(insulin_cmn), " proteins)"),
+          mainCol = paste0(mycol, 70), outlineCol = darken(mycol))
+plot(NULL, xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+addLegend(basal_cmn, fcol = "markers", where = "left", cex = 1.4, ncol = 1, y.intersp = 1.1)
+```

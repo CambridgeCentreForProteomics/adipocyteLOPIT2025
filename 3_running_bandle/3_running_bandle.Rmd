@@ -1,0 +1,164 @@
+---
+title: "Notebook 3: bandle"
+author: "Olivia J. Conway"
+date: "`r Sys.Date()`"
+fontsize: 11pt
+output:
+  rmdformats::robobook:
+    theme: default
+    fig_caption: yes
+    use_bookdown: yes
+pdf_document:
+    toc: yes
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+This notebook contains the R code used to perform differential localisation 
+analyses using the `bandle` package.
+
+## Install and load packages
+
+Install R packages needed for data processing -
+
+```{r, eval=FALSE}
+if (!require("BiocManager", quietly = TRUE)) {
+install.packages("BiocManager")
+}
+
+BiocManager::install(c("bandle",
+                       "coda",
+                       "tictoc",
+                       "here"))
+```
+
+Load packages
+
+```{r, eval=TRUE,message=FALSE, warning=FALSE}
+library("bandle")
+library("coda")
+library("tictoc")
+library("here")
+```
+
+## Load data
+
+```{r, eval=TRUE}
+# individual replicates (basal_prots, insulin_prots)
+load(here("output/adipocyte_bandle_msnsets.rda"))
+```
+
+## The `bandle` package
+
+In this analyses we use the [`bandle` package](https://www.bioconductor.org/packages/release/bioc/html/bandle.html) to perform differential
+localisation analyses. `bandle` which stands for Bayesian ANalysis of
+Differential Localisation, is a method developed by [Crook et al. in 2022](https://doi.org/10.1038/s41467-022-33570-9) which
+implements integrative semi-supervised functional mixture model, to obtain the
+probability of a protein being differentially localised between two conditions.
+
+# Preparing data for bandle
+
+## Data formatting
+
+`bandle` requires two `lists` of `MSnSets` one for each condition, containing
+the common proteins between all conditions and replicates
+
+```{r, eval=TRUE}
+## put the MSnSets into a "list"
+quant_list <- list(basal_prots[[1]], basal_prots[[2]], basal_prots[[3]],
+                   insulin_prots[[1]], insulin_prots[[2]], insulin_prots[[3]])
+
+## Keep common proteins across all replicates and conditions
+quant_list <- commonFeatureNames(quant_list)
+
+## Put data into 2 lists one for each condition
+basal <- list(quant_list[[1]], quant_list[[2]], quant_list[[3]])
+insulin <- list(quant_list[[4]], quant_list[[5]], quant_list[[6]])
+all_conditions <- c(basal, insulin)
+```
+
+## Fitting Gaussian Process
+First we fit non-parametric regression functions to the markers profiles.  
+
+<br>  
+
+### Prior
+The prior needs to form a `K*3` matrix (where `K` is the number of organelle classes in the data).  
+One column is for the prior, one for the length-scale amplitude and one for the SD parameters. 
+```{r, eval=TRUE}
+# Find number of organelle classes in data
+K <- length(getMarkerClasses(all_conditions[[1]], fcol = "markers"))
+```
+
+```{r, eval=TRUE}
+pc_prior <- matrix(NA, ncol = 3, K)
+pc_prior[seq.int(1:K), ] <- matrix(rep(c(1, 50, 50),
+                                       each = K), ncol = 3)
+```
+
+### Fit GP using priors
+Now the complexity priors have been generated, we pass them as an argument to the `fitGPmaternPC` function.  
+```{r, fig.width=9, fig.height=16, eval=TRUE}
+gpParams <- lapply(all_conditions, function(x) fitGPmaternPC(x,  hyppar = pc_prior))
+```
+
+Plot the GP fits
+```{r, eval=TRUE, fig.width=9, fig.height=9}
+## create labels for the plots
+id <- c(paste0("basal-rep", 1:3), paste0("insulin-rep", 1:3))
+
+## now plot all GPs
+for (i in seq(all_conditions)) {
+  # png(file = paste0("3_running_bandle/figures/gpParams_", 
+  #                   id[i], ".png"), height = 4000, width = 4000, 
+  #     units = "px", res = 400)
+  par(mar=c(2,2,2,2), oma = c(2,2,6,2), mfrow = c(4,3)) 
+  plotGPmatern(all_conditions[[i]], params = gpParams[[i]])
+  mtext(id[i], side = 3, outer = TRUE, font = 2, cex = 2, line =2)
+  # dev.off()
+}
+```
+
+## Setting the prior on weights
+Dirichlet distribution is a family of continuous multivariate probability
+distributions parameterized by a vector of positive reals. It is a multivariate
+generalization of the beta distribution.
+<br>
+```{r, eval=TRUE}
+set.seed(1)
+dirPrior = diag(rep(1, K)) + matrix(0.0002, nrow = K, ncol = K)
+
+### sanity check, doesn't actually affect bandle function as only dirPrior goes in
+predDirPrior <- prior_pred_dir(object = all_conditions[[1]],
+                               dirPrior = dirPrior,
+                               q = 15)
+```
+
+
+Save the parameters,
+
+```{r, eval=FALSE}
+save(basal, insulin, gpParams, pc_prior, dirPrior, file = here("output/adipocyte_lopit_bandle_input.rda"))
+```
+
+# Running BANDLE
+
+The `bandle` method is computationally intensive requires a HPC to run. We used
+the University of Cambridge HPC to run the analysis. The output `bandle` run 
+has been uploaded to Zenodo at xxx with DOI (add URL and DOI).
+
+```{r, eval=FALSE}
+bandle_output <- bandle(objectCond1 = basal,
+                        objectCond2 = insulin,
+                        numIter = 30000,
+                        burnin = 5000,
+                        thin = 20,
+                        gpParams = gpParams,
+                        pcPrior = pc_prior,
+                        numChains = 4,                       
+                        dirPrior = dirPrior,
+                        seed = 1)
+```
+

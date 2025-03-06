@@ -1,0 +1,538 @@
+---
+title: 'Notebook 1: Data Processing'
+author: "Olivia J. Conway"
+date: "`r Sys.Date()`"
+fontsize: 11pt
+output:
+  rmdformats::robobook:
+    theme: default
+    fig_caption: yes
+    use_bookdown: yes
+pdf_document:
+    toc: yes
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+
+# Data Overview
+This file contains the R code used for the computational analysis of "Dynamic
+subcellular proteomics identifies novel regulators of adipocyte insulin action",
+submitted to BioRxiv 2025. We performed LOPIT-DC in 3T3-L1 adipocytes (mouse
+adipocyte cell line) to determine changes in protein localisation in response to
+acute insulin and CL316,243 (B3-AR agonist) stimulation.
+
+# Install and load packages
+
+Install R packages needed for data processing -
+
+```{r, eval=FALSE}
+if (!require("BiocManager", quietly = TRUE)) {
+install.packages("BiocManager")
+}
+
+BiocManager::install(c("pRoloc",
+                       "MSnbase",
+                       "pRolocGUI",
+                       "tidyverse",
+                       "patchwork",
+                       "gridExtra",
+                       "colorspace",
+                       "gplots",
+                       "kableExtra",
+                       "here",
+                       "VennDiagram",
+                       "biobroom",
+                       "archive",
+                       "eulerr",
+                       "RColorBrewer",
+                       "Rtsne"))
+```
+
+Load R packages -
+
+```{r, eval=TRUE, message=FALSE, warning=FALSE}
+library("pRoloc")
+library("MSnbase")
+library("pRolocGUI")
+library("tidyverse")
+library("patchwork")
+library("gridExtra")
+library("colorspace")
+library("gplots")
+library("kableExtra")
+library("here")
+library("VennDiagram")
+library("biobroom")
+library("archive")
+library("eulerr")
+library("RColorBrewer")
+```
+
+Load functions used in data processing -
+
+```{r}
+source(here("R/prettymap.R"))
+source(here("R/getpsms.R"))
+source(here("R/Utility.R"))
+```
+
+# Data processing
+
+In this code chunk we read in the data using the function `parse_features` 
+to pass the output .txt file output from the Proteome Discoverer software
+which contains the PSM level data. This function reads the PSMs into R and 
+performs filtering against the file `cRAP_FullIdentifiers.fasta` which is
+an in-house curated contaminants file derived from the [GPM cRAP database](https://www.thegpm.org/crap/).
+
+```{r, results = "hide"}
+f <- here("data/adipocyte_lopit_PSMs.txt.tar.gz")
+res <- parse_features(infile = f,  
+                     crap_fasta = here("R/cRAP_FullIdentifiers.fasta"),
+                     TMT = TRUE,
+                     level="PSM",
+                     filter_associated_crap = TRUE,
+                     protein_group_col = "X..Protein.Groups")
+```
+
+
+## Non-specific filtering
+
+- Check we have no PSMs which lack quantitative data. 
+```{r, results = "hide"}
+table(res$Quan.Info)
+torm <- which(res$Quan.Info == "NoQuanLabels")
+```
+
+- Check PSMs are unique i.e. PSMs where “Number.of.Protein.Groups” is equal to 1.
+```{r, results="hide"}
+table(res$Number.of.Protein.Groups)
+```
+
+- Remove peptides with "Rank" or "Search Engine Rank" > 1
+```{r, results="hide"}
+(table(res$Rank))
+ind <- which(res$Rank > 1)
+res <- res[-ind, ]
+
+(table(res$Search.Engine.Rank))
+ind <- which(res$Search.Engine.Rank > 1)
+res <- res[-ind, ]
+```
+
+- Check peptides with no accession number have been removed
+```{r noid, results="hide"}
+which(res$Protein.Accessions == "")
+which(res$Master.Protein.Accessions == "")
+```
+
+- Double check all contaminants have been removed
+```{r rmCrap, results="hide"}
+crap <- grep("CRAP", res$Protein.Accessions, 
+             ignore.case = TRUE)
+length(crap)
+```
+
+## Create the MSnSet data structures
+
+- Create a MSnSet
+```{r createMSnSets}
+quant_x <- as.matrix(res[, grep("Abundance", colnames(res))])
+fdata_x <- AnnotatedDataFrame(res[, -grep("Abundance", colnames(res))])
+psms <- MSnSet(exprs = quant_x, fData = fdata_x, stringsAsFactors = FALSE)
+```
+
+- Split by Spectrum.File which identified each experiment
+```{r}
+sf <- fData(psms)$Spectrum.File
+```
+
+- Split by condition
+```{r splitbycond}
+basal <- psms[grep("Basal", sf),  ]
+insulin <- psms[grep("Insulin", sf),  ]
+```
+
+- Split by replicate 
+
+```{r repsplit, results = "hide"}
+## basal replicates
+b_sf <- fData(basal)$Spectrum.File
+names(table(b_sf))
+basal_r1 <- basal[grep("P973", b_sf), ]
+basal_r2 <- basal[grep("_2_", b_sf), ]
+basal_r3 <- basal[grep("_3_", b_sf), ]
+
+dim(basal_r1) # 50579 PSMs
+dim(basal_r2) # 58716 PSMs 
+dim(basal_r3) # 56192 PSMs
+
+## insulin replicates
+i_sf <- fData(insulin)$Spectrum.File
+names(table(i_sf))
+insulin_r1 <- insulin[grep("P973", i_sf), ]
+insulin_r2 <- insulin[grep("_2_", i_sf), ]
+insulin_r3 <- insulin[grep("_3_", i_sf), ]
+
+dim(insulin_r1) # 54566 PSMs
+dim(insulin_r2) # 60567 PSMs 
+dim(insulin_r3) # 57958 PSMs
+```
+
+- Make into MSnSet List
+Make these 3 replicates into an `MSnSetList` for ease of coding.
+
+```{r makemsnsets}
+basal_psms <- MSnSetList(list(basal_r1, basal_r2, basal_r3))
+insulin_psms <- MSnSetList(list(insulin_r1, insulin_r2, insulin_r3))
+```
+
+- Add experiment data to each MSnSet
+Here we add `phenoData` also called `pData`, which stores experimental
+information e.g. replicates, treatments, fraction information, TMT information
+etc.
+
+```{r addpdata2}
+# function to add pData to out MSnSets in the MSnSetList
+makepdata <- function(msnset, 
+                      tr,      ## treatment/time (if any)
+                      repInfo) {  
+  tmtID <- function(x) strsplit(sampleNames(msnset), "Abundance..")[[x]][2] 
+  tmtTag <- sapply(seq(1:ncol(msnset)), function(x) tmtID(x))
+  pData(msnset)$Tag <- tmtTag
+  pData(msnset)$Treatment <- tr
+  pData(msnset)$Replicate <- repInfo
+  sampleNames(msnset) <- paste0(tmtTag, "_", tr, "_rep", repInfo)
+return(msnset)
+}
+
+## Now add the pData
+for (i in 1:length(basal_psms))
+  basal_psms@x[[i]] <- makepdata(basal_psms[[i]], tr = "Basal", repInfo = i)
+
+for (i in 1:length(insulin_psms))   
+  insulin_psms@x[[i]] <- makepdata(insulin_psms[[i]], tr = "Insulin", repInfo = i)
+```
+
+### Add more PSM information to MSnSets
+- `getPSMsCount` = counts the number of PSMs which have the same aa sequence
+(column name in fData: "PSM.count")
+- `recordPSMsNA` = the number of number of missing values each PSM has across
+the fractions  (column name in fData: "PSM.count.na")
+- `maxPSMsNA` = the max number of missing values i.e. if we have 3 PSMs for
+a protein group and 2 have 1 missing values, and 1 has no missing values, we
+record 1 as the max (so missing value information is not lost when combining to
+peptide/protein  (column name in fData: "PSM.count.na.max")
+
+
+```{r addpsmsinfo}
+## adding getPSMscount
+basal_psms <- lapply(basal_psms, getPSMsCount)
+insulin_psms <- lapply(insulin_psms, getPSMsCount)
+
+## adding recordPSMsNA
+basal_psms <- lapply(basal_psms, recordPSMsNA)
+insulin_psms <- lapply(insulin_psms, recordPSMsNA)
+
+## adding maxPSMsNA
+basal_psms <- lapply(basal_psms, maxPSMsNA)
+insulin_psms <- lapply(insulin_psms, maxPSMsNA)
+```
+
+- Show number of PSMs per experiment 
+```{r}
+paste("Basal PSMs in rep", 1:3, "is", sapply(basal_psms, nrow))
+paste("Insulin PSMs in rep", 1:3, "is", sapply(insulin_psms, nrow))
+```
+
+# Missing values and imputation
+
+By plotting the number of missing values (MVs) per PSM we see we have very few missing 
+values at the PSM level. We choose to remove any PSM with >3 missing values
+across each 10plex experiment. Any PSMs with 3 or less MVs are further examined and if these
+PSMs are (i) the only quantitation for a given protein i.e. single protein hits, or (ii)
+there is other PSM support available for the corresponding protein group. If
+there is other support available any PSM with a missing value is removed and not
+used. The remaining few PSMs which are quantitation for single protein hits are assessed and 
+taken forward for imputation. For the basal condition this is 177, 55 and 50 PSMs
+out of a total of 40048, 55725 and 52808 PSMs for replicates 1, 2 and 3. Similarly,
+for the insulin condition this is 93, 50, 56 PSMs out of a total of 54566, 60567,
+57958 PSMs for replicates 1, 2 and 3. In all cases this accounts for less than 1%
+of each PSM population.
+
+
+### Basal
+
+Evaluate PSMs with MVs
+
+```{r missingVals_basal, fig.width=10, fig.height=3}
+mv_basal <- lapply(basal_psms, function(z) table(fData(z)[["PSM.count.na"]]))
+
+par(mfrow = c(1, 3))
+for (i in seq_along(mv_basal))
+     barplot(mv_basal[[i]], xlab = "# of MVs", 
+             ylab = "# of PSMs", main = paste0("Replicate ", i, ": basal"))
+```
+
+
+First we choose to remove all that have more than 3 missing values
+
+```{r mv_more}
+for (i in seq(basal_psms)) {
+  ind <- which(fData(basal_psms[[i]])$PSM.count.na > 3)
+  if (length(ind) > 0) basal_psms@x[[i]] <- basal_psms@x[[i]][-ind, ]
+}
+```
+
+In the below code we examine the protein group of each PSM which has a missing
+value, and find that in many cases there are other PSMs available that can be used for
+quantitation so these PSMs can just be removed. 
+
+```{r keepMVforSingletons}
+## Examine which protein groups have peptides with missing values
+xx <- lapply(basal_psms, function(x) which(fData(x)[["PSM.count.na"]] != 0))
+numpeps <- sapply(seq(basal_psms), function(y) {
+  sapply(fData(basal_psms[[y]])$Master.Protein.Accessions[xx[[y]]],
+  function(z) length(which(fData(basal_psms[[y]])$Master.Protein.Accessions== z)))})
+
+## single pep hits with a NA
+singletons_withNA <- sapply(seq(xx), function(i) xx[[i]][which(numpeps[[i]] == 1)])
+
+## all other basal_psms with a NA
+others_withNA <- sapply(seq(xx), function(i) xx[[i]][which(numpeps[[i]] != 1)])
+
+for (i in seq(basal_psms)) {
+  basal_psms@x[[i]] <- basal_psms@x[[i]][-others_withNA[[i]], ]
+}
+```
+
+### Insulin
+
+We repeat the above for the insulin condition.
+
+```{r missingVals_insulin, fig.width=10, fig.height=3}
+mv_insulin <- lapply(insulin_psms, function(z) table(fData(z)[["PSM.count.na"]]))
+
+par(mfrow = c(1, 3))
+for (i in seq_along(mv_insulin))
+     barplot(mv_insulin[[i]], xlab = "# of MVs", 
+             ylab = "# of PSMs", main = paste0("Replicate ", i, ": insulin"))
+```
+
+```{r insulinreprmvMV}
+for (i in seq(insulin_psms)) {
+  ind <- which(fData(insulin_psms[[i]])$PSM.count.na > 3)
+  if (length(ind) > 0) insulin_psms@x[[i]] <- insulin_psms@x[[i]][-ind, ]
+}
+
+## Examine which protein groups have peptides with missing values
+xx <- lapply(insulin_psms, function(x) which(fData(x)[["PSM.count.na"]] != 0))
+numpeps <- sapply(seq(insulin_psms), function(y){
+  sapply(fData(insulin_psms[[y]])$Master.Protein.Accessions[xx[[y]]],
+  function(z) length(which(fData(insulin_psms[[y]])$Master.Protein.Accessions== z)))})
+
+## single pep hits with a NA
+singletons_withNA <- sapply(seq(xx), function(i) xx[[i]][which(numpeps[[i]] == 1)])
+
+## all other insulin_psms with a NA
+others_withNA <- sapply(seq(xx), function(i) xx[[i]][which(numpeps[[i]] != 1)])
+
+## Remove insulin_psms with a NA that are NOT single pep hits
+## as we can use the other data for quantitation 
+for (i in seq(insulin_psms)) {
+  insulin_psms@x[[i]] <- insulin_psms@x[[i]][-others_withNA[[i]], ]
+}
+```
+
+- Missing values always tend to appear in the first or last fractions thus we
+choose a left censored imputation approach for these few PSMs.
+
+```{r impute, warning=FALSE, message=FALSE}
+basal_psms <- lapply(basal_psms, function(z) 
+  MSnbase::impute(z, method = "MinDet"))
+
+insulin_psms <- lapply(insulin_psms, function(z) 
+  MSnbase::impute(z, method = "MinDet"))
+```
+
+# Aggregation
+
+For LOPIT we always use all PSMs for quantification, as otherwise we risk
+missing seeing mixed locations. Here, we use the `robust` method to aggregate
+from PSM to protein in `MSnbase`.
+
+```{r aggrobust, warning=FALSE, message=FALSE}
+basal_prots <- lapply(basal_psms, function(z)
+  combineFeatures(z, 
+                  method = "robust",
+                  groupBy = fData(z)[, "Master.Protein.Accessions"],
+                  verbose = FALSE))
+
+insulin_prots <- lapply(insulin_psms, function(z)
+  combineFeatures(z, 
+                  method = "robust",
+                  groupBy = fData(z)[, "Master.Protein.Accessions"],
+                  verbose = FALSE))
+```
+
+# Normalisation
+
+PSMs are scaled into the same intensity interval by dividing each intensity by
+the sum of the intensities for that quantitative feature. This transformation of
+the data ensures cancellation of the effect of the absolute intensities of the
+quantitative features along the rows, and focuses subsequent analyses on the
+relative profiles across the subcellular channels.
+
+```{r normdata}
+basal_prots <- lapply(basal_prots, function(z) normalise(z,  "sum"))
+insulin_prots <- lapply(insulin_prots, function(z) normalise(z,  "sum"))
+```
+
+# Final protein level data
+
+In this section we generate the final protein level datasets and the 
+appropriate data formats for `bandle` and visualisation.
+
+- First we `updateFvarLabels`, where we update the labels of the feature data 
+
+```{r concatenateData}
+for (i in seq(basal_prots)) {
+  basal_prots@x[[i]] <- updateFvarLabels(basal_prots[[i]],
+                                         label = paste0("rep", i),
+                                         sep = "_")
+  insulin_prots@x[[i]] <- updateFvarLabels(insulin_prots[[i]],
+                                         label = paste0("rep", i),
+                                         sep = "_")
+}
+```
+
+- Concatenate replicates using the `MSnbase::combine` function for visualisation
+of the data on PCA and t-SNE projections
+
+```{r}
+## count proteins
+basal_tot_12 <- nrow(filterNA(MSnbase::combine(basal_prots[[1]], basal_prots[[2]])))
+basal_tot_23 <- nrow(filterNA(MSnbase::combine(basal_prots[[2]], basal_prots[[3]])))
+basal_tot_13 <- nrow(filterNA(MSnbase::combine(basal_prots[[1]], basal_prots[[3]])))
+
+## concatenate for viz
+basal_p <- filterNA(MSnbase::combine(basal_prots[[1]], basal_prots[[2]]))
+basal_p <- filterNA(MSnbase::combine(basal_p, basal_prots[[3]]))
+basal_tot <- nrow(basal_p)
+paste("We find", basal_tot, "proteins in basal")
+```
+
+Visualise on a Euler plot using the `eulerr` package. See vignette from
+[https://jolars.github.io/eulerr/articles/gallery.html](https://jolars.github.io/eulerr/articles/gallery.html)
+
+```{r}
+## Get information for fitting of Euler
+rep12_tot <- basal_tot_12 - basal_tot 
+rep23_tot <- basal_tot_23 - basal_tot 
+rep13_tot <- basal_tot_13 - basal_tot 
+rep1_only <- nrow(basal_prots[[1]]) - (rep12_tot + rep13_tot + basal_tot)
+rep2_only <- nrow(basal_prots[[2]]) - (rep12_tot + rep23_tot + basal_tot)
+rep3_only <- nrow(basal_prots[[3]]) - (rep13_tot + rep23_tot + basal_tot)
+
+## fit and plot
+fit <- euler(combinations = c("Replicate 1" = rep1_only, 
+                              "Replicate 2" = rep2_only, 
+                              "Replicate 3" = rep3_only,
+                              "Replicate 1&Replicate 2" = rep12_tot,
+                              "Replicate 1&Replicate 3" = rep13_tot,
+                              "Replicate 2&Replicate 3" = rep23_tot,
+                              "Replicate 1&Replicate 2&Replicate 3" = basal_tot),
+             shape = "ellipse")
+myCol <- brewer.pal(3, "Pastel1") 
+# myCol <- c("#66D2D6", "#FBC740", "#E56997")
+plot(fit, 
+     edges = list(lty = 5), 
+     fills = list(fill = myCol, alpha = .8),
+     legend = list(side = "right", font = 2, cex = 1.2),
+     quantities = TRUE,
+     main = "Basal")
+     # quantities = list(type = c("counts", "percent"), font = 2, cex = 1.2))
+```
+
+```{r}
+## count proteins
+insulin_tot_12 <- nrow(filterNA(MSnbase::combine(insulin_prots[[1]], insulin_prots[[2]])))
+insulin_tot_23 <- nrow(filterNA(MSnbase::combine(insulin_prots[[2]], insulin_prots[[3]])))
+insulin_tot_13 <- nrow(filterNA(MSnbase::combine(insulin_prots[[1]], insulin_prots[[3]])))
+
+## insulin
+insulin_p <- filterNA(MSnbase::combine(insulin_prots[[1]], insulin_prots[[2]]))
+insulin_p <- filterNA(MSnbase::combine(insulin_p, insulin_prots[[3]]))
+insulin_tot <- nrow(insulin_p)
+paste("We find", nrow(insulin_p), "proteins in insulin")
+```
+
+```{r}
+## Get information for fitting of Euler
+rep12_tot <- insulin_tot_12 - insulin_tot 
+rep23_tot <- insulin_tot_23 - insulin_tot 
+rep13_tot <- insulin_tot_13 - insulin_tot 
+rep1_only <- nrow(insulin_prots[[1]]) - (rep12_tot + rep13_tot + insulin_tot)
+rep2_only <- nrow(insulin_prots[[2]]) - (rep12_tot + rep23_tot + insulin_tot)
+rep3_only <- nrow(insulin_prots[[3]]) - (rep13_tot + rep23_tot + insulin_tot)
+
+## fit and plot
+fit <- euler(combinations = c("Replicate 1" = rep1_only, 
+                              "Replicate 2" = rep2_only, 
+                              "Replicate 3" = rep3_only,
+                              "Replicate 1&Replicate 2" = rep12_tot,
+                              "Replicate 1&Replicate 3" = rep13_tot,
+                              "Replicate 2&Replicate 3" = rep23_tot,
+                              "Replicate 1&Replicate 2&Replicate 3" = insulin_tot),
+             shape = "ellipse")
+myCol <- brewer.pal(3, "Pastel1") 
+# myCol <- c("#66D2D6", "#FBC740", "#E56997")
+plot(fit, 
+     edges = list(lty = 5), 
+     fills = list(fill = myCol, alpha = .8),
+     legend = list(side = "right", font = 2, cex = 1.2),
+     quantities = TRUE,
+     main = "Insulin")
+     # quantities = list(type = c("counts", "percent"), font = 2, cex = 1.2))
+```
+
+- Common proteins between conditions
+```{r}
+cmn <- commonFeatureNames(list(basal_p, insulin_p))
+basal_cmn <- cmn[[1]]
+insulin_cmn <- cmn[[2]]
+paste("We find", nrow(basal_cmn), "proteins common in both conditions, across all replicates")
+```
+
+```{r}
+## fit and plot
+fit <- euler(combinations = c("Basal" = basal_tot - nrow(basal_cmn), 
+                              "Insulin" = insulin_tot - nrow(basal_cmn), 
+                              "Basal&Insulin" = nrow(basal_cmn)),
+             shape = "ellipse")
+myCol <- c("#66D2D6", "#FBC740")
+plot(fit, 
+     edges = list(lty = 5), 
+     fills = list(fill = myCol, alpha = .8),
+     legend = list(side = "bottom", font = 2, cex = 1.2),
+     # quantities = TRUE,
+     main = "Both conditions",
+     quantities = list(type = c("counts", "percent"), font = 2, cex = 1.2))
+```
+
+# Save final MSnSet objects
+```{r, eval=FALSE}
+# Individual replicates
+save(basal_prots, insulin_prots,
+     file = here("output/adipocyte_lopit_MSnSet.rda"))
+
+# concatenated replicates
+save(basal_p,insulin_p,
+     file = here("output/adipocyte_lopit_MSnSet_concat.rda"))
+
+# concatenated replicates, common proteins only
+save(basal_cmn, insulin_cmn, cmn,
+     file = here("output/adipocyte_lopit_MSnSet_cmn.rda"))
+```
+

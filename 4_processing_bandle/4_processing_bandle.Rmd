@@ -1,0 +1,566 @@
+---
+title: "Notebook 4: Machine learning analysis"
+author: "Olivia J. Conway"
+date: "`r Sys.Date()`"
+fontsize: 11pt
+output:
+  rmdformats::robobook:
+    theme: default
+    fig_caption: yes
+    use_bookdown: yes
+pdf_document:
+    toc: yes
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Overview
+In this notebook we analyse the output machine learning results from running
+the `bandle` classifier for differential localisation. We follow the [vignettes](https://www.bioconductor.org/packages/release/bioc/vignettes/bandle/inst/doc/v01-getting-started.html)
+in the `bandle` package in Bioconductor.
+
+## Install and load packages
+
+Install R packages needed for data processing -
+
+```{r, eval=FALSE}
+if (!require("BiocManager", quietly = TRUE)) {
+install.packages("BiocManager")
+}
+
+BiocManager::install(c("pRoloc",
+                       "MSnbase",
+                       "pRolocGUI",
+                       "tidyverse",
+                       "patchwork",
+                       "gridExtra",
+                       "colorspace",
+                       "gplots",
+                       "kableExtra",
+                       "here",
+                       "VennDiagram",
+                       "eulerr",
+                       "Rtsne",
+                       "here"))
+```
+
+Load packages
+
+```{r, eval=TRUE,message=FALSE, warning=FALSE}
+library("pRoloc")
+library("MSnbase")
+library("pRolocGUI")
+library("tidyverse")
+library("patchwork")
+library("gridExtra")
+library("colorspace")
+library("gplots")
+library("kableExtra")
+library("Rtsne")
+library("here")
+library("VennDiagram")
+library("eulerr")
+library("RColorBrewer")
+library("bandle")
+library("here")
+```
+
+## Load functions
+```{r, eval=TRUE}
+source(here("R/prettymap.R"))
+source(here("R/bandle_outliers.R"))
+```
+
+# Processing BANDLE output
+
+## Load BANDLE output
+
+The `bandle` output can be found on Zenodo at DOI xxx as it is too big for
+this repo.
+
+```{r, eval=FALSE}
+load(here("output/adipocyte_lopit_bandle_input.rda"))
+load(here("output/adipocyte_lopit_bandle_output.rda"))
+```
+
+```{r, eval=TRUE, include=FALSE}
+## Load the processed bandle output so we don't have to run in the notebook
+load(here("output/adipocyte_lopit_bandle_input.rda"))
+load(here("output/adipocyte_lopit_bandle_output.rda"))
+load(here("output/adipocyte_lopit_bandle_processed.rda"))
+```
+
+```{r, eval=FALSE}
+bandle_output <- bandleProcess(bandle_output)
+```
+
+## Assessing convergence
+
+The `bandlea package used Markov chain Monte Carlo (MCMC) sampling. In MCMC
+methods "chains" are drawn of random samples from the unknown posterior where
+the current value depends on the previously drawn value (but not on values
+before that). Once the chain has converged, its elements can be seen as a sample
+from the target posterior probability distribution. A common first assessment of
+whether chains have converged is to assess trace and density plots. We use the
+`plotOutliers` function (which uses code from the [`coda` package](https://cran.r-project.org/web/packages/coda/index.html)) to generate
+trace and density plots for each replicate and each condition to give us an idea
+of convergence.
+
+```{r, fig.height=10, fig.width=10}
+plotOutliers(bandle_output)
+```
+
+We further examine the Gelman statistics to give us more information on convergence.
+
+```{r}
+calculateGelman(bandle_output)
+```
+
+The trace and density plots look as expected and the Gelman statistics are all
+< 1.2, thus we take all 4 chains forward for our analysis.
+
+<!-- ## Extract the posterior estimates and protein allocation predictions -->
+
+<!-- Following the vignettes in the `bandle` package we extract the posterior -->
+<!-- estimates and then visualise the distribution of protein allocations prior -->
+<!-- to any filtering. -->
+
+<!-- ```{r, eval=FALSE} -->
+<!-- pe1 <- summaries(bandle_output)[[1]]@posteriorEstimates -->
+<!-- pe2 <- summaries(bandle_output)[[2]]@posteriorEstimates -->
+
+<!-- barplot(table(pe1$bandle.allocation), col = getStockcol()[2], -->
+<!--         las = 2, ylim = c(0,1200), main = "Basal: Protein allocation \n pre-thresholding", -->
+<!--         ylab = "Number of proteins") -->
+<!-- barplot(table(pe2$bandle.allocation), col = getStockcol()[2], -->
+<!--         las = 2, ylim = c(0,1200), main = "Insulin: Protein allocation \n pre-thresholding", -->
+<!--         ylab = "Number of proteins") -->
+<!-- ``` -->
+
+<!-- **Glossary:** -->
+
+<!-- *bandle.allocation:* contains the the localisation predictions to one of the -->
+<!-- subcellular classes that appear in the training data.   -->
+<!-- <br> -->
+<!-- *bandle.probability:* the allocation probability, corresponding to the mean -->
+<!-- of the distribution probability.   -->
+<!-- <br> -->
+<!-- *bandle.outlier:* the probability of being an outlier. A high value -->
+<!-- indicates that the protein is unlikely to belong to any annotated class (and is -->
+<!-- hence considered an outlier).   -->
+<!-- <br> -->
+<!-- *bandle.probability.lowerquantile* and *bandle.probability.upperquantile:* -->
+<!-- the upper and lower quantiles of the allocation probability distribution.   -->
+<!-- <br> -->
+<!-- *bandle.mean.shannon:* the Shannon entropy, measuring the uncertainty in the -->
+<!-- allocations (a high value representing high uncertainty; the highest value is -->
+<!-- the natural logarithm of the number of classes).   -->
+<!-- <br> -->
+<!-- *bandle.differential.localisation:* the differential localisation probability.   -->
+<!-- <br> -->
+
+## Extracting the bandle results
+
+We use `bandlePredict` to append results to original `MSnSet.` Note, results are 
+appended to **first** replicate of each condition in the `MSnSet` data structure.
+
+```{r, eval=TRUE}
+res <- bandlePredict(objectCond1 =  basal, 
+                     objectCond2 =  insulin, 
+                     params = bandle_output, 
+                     fcol = "markers")
+
+res_basal <- res[[1]]
+res_insulin <- res[[2]]
+```
+
+
+```{r, eval=TRUE}
+# Update labels of each replicate
+for (i in seq(res_basal)) {
+  res_basal[[i]] <- updateFvarLabels(res_basal[[i]],
+                                     label = paste0("rep", i),
+                                     sep = "_")
+  res_insulin[[i]] <- updateFvarLabels(res_insulin[[i]],
+                                       label = paste0("rep", i),
+                                       sep = "_")
+}
+
+# Combine into MSnSet
+res_basal_p <- MSnbase::combine(res_basal[[1]], res_basal[[2]])
+res_basal_p <- MSnbase::combine(res_basal_p, res_basal[[3]])
+res_insulin_p <- MSnbase::combine(res_insulin[[1]], res_insulin[[2]])
+res_insulin_p <- MSnbase::combine(res_insulin_p, res_insulin[[3]])
+```
+
+
+# Exploring the allocations and outliers
+
+BANDLE gives us the `allocation probability` (the mean posterior probability for
+the master protein subcellular allocations computed by TAGM-MCMC), and the
+`outlier probability` (the posterior probability for the protein to belong to
+the outlier component rather than any of the annotated components in the basal
+LOPIT data).
+
+Below we threshold on both of these values, to remove allocations from proteins
+that have a low allocation probability or high probability of being an outlier
+to make our allocations more robust and reduce over-allocation to subcellular
+compartments. Proteins where the allocation or outlier probability value does
+not meet the threshold are left unannotated and given "unknown" localisation.
+
+## Basal results
+
+```{r, eval=TRUE}
+## get proteins NOT used as markers
+basal_un_msnset <- unknownMSnSet(res_basal_p, fcol = "markers_rep1")
+
+## plot BANDLE allocation probability
+nt_prob_b <- tapply(fData(basal_un_msnset)[, "bandle.probability_rep1"],
+                    fData(basal_un_msnset)[, "bandle.allocation_rep1"], 
+                    summary)
+boxplot(nt_prob_b, las = 2, main = "BANDLE probabilities by organelle")
+```
+
+The closer the outlier probability is to 1, the more likely it is we have
+outliers for that organelle class
+
+```{r, eval=TRUE}
+nt_out_b <- tapply(fData(basal_un_msnset)[, "bandle.outlier_rep1"], 
+                 fData(basal_un_msnset)[, "bandle.allocation_rep1"], 
+                 summary)
+boxplot(nt_out_b, las = 2, main = "BANDLE outlier component prob. by organelle")
+```
+
+Here we create a new column where we invert outlier probability (so the closer
+the outlier probability is to 1, the more likely it is we have outliers for that
+organelle class).
+
+```{r, eval=TRUE}
+## create a new column for the outlier probability
+fData(res_basal_p)$outlier.prob <- 1 - fData(res_basal_p)$bandle.outlier_rep1
+fData(basal_un_msnset)$outlier.prob <- 1 - fData(basal_un_msnset)$bandle.outlier_rep1
+
+nt_out_b <- tapply(fData(basal_un_msnset)[, "outlier.prob"], 
+                 fData(basal_un_msnset)[, "bandle.allocation_rep1"], 
+                 summary)
+# boxplot(nt_out_b, las = 2, main = "BANDLE (1 - outlier) component prob. by organelle: Basal")
+```
+
+
+### Thresholding on allocation probability only ("low confidence")
+
+Fist we threshold on allocation probability.
+<br>
+<br>
+`fcol:` name of the prediction column in the feature data  
+`scol:` name of the prediction score column  
+`mcol:` name of the feature meta data containing the labelled training data (doesn't have bandle allocation/probability scores)  
+`t:` the score threshold, everything with score <t are set to 'unknown'
+
+```{r, eval=TRUE}
+# here we set the allocation to "unknown" for all proteins where the allocation probability is <0.9)
+res_basal_p <- getPredictions(res_basal_p, 
+                              fcol = "bandle.allocation_rep1", 
+                              scol = "bandle.probability_rep1",
+                              mcol = "markers_rep1",
+                              t = 0.9)
+```
+
+
+### Thresholding on allocation and outlier probability ("high confidence")
+
+As the outlier probability varies a lot across organelles, we threshold each one
+individually, based on it's median outlier probability score.
+
+
+```{r, eval=TRUE}
+summary_df_b <- data.frame(
+  Organelle = names(nt_out_b),
+  Min = sapply(nt_out_b, function(x) x["Min."]),
+  Q1 = sapply(nt_out_b, function(x) x["1st Qu."]),
+  Median = sapply(nt_out_b, function(x) x["Median"]),
+  Mean = sapply(nt_out_b, function(x) x["Mean"]),
+  Q3 = sapply(nt_out_b, function(x) x["3rd Qu."]),
+  Max = sapply(nt_out_b, function(x) x["Max."]),
+  row.names = NULL
+)
+print(summary_df_b)
+```
+
+```{r}
+t_user <- c(0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0)
+names(t_user) <- c(getMarkerClasses(res_basal_p, fcol = "markers_rep1"), "unknown")
+
+res_basal_p <- getPredictions(res_basal_p, 
+                              fcol = "bandle.allocation_rep1.pred", 
+                              scol = "outlier.prob",
+                              mcol = "markers_rep1",
+                              t = t_user)
+```
+
+```{r}
+# if median outlier prob = 0 then threshold = 1, else threshold = median
+## proteins allocated to an organelle with an outlier probability of <threshold are changed to "unknown"
+t_user <- c(0.7479, 1, 0.1470, 1, 1, 1, 1, 0.0102, 1, 1, 0)
+names(t_user) <- c(getMarkerClasses(res_basal_p, fcol = "markers_rep1"), "unknown")
+
+res_basal_p <- getPredictions(res_basal_p, 
+                     fcol = "bandle.allocation_rep1.pred.pred", 
+                     scol = "outlier.prob",
+                     mcol = "markers_rep1",
+                     t = t_user)
+```
+
+### Basal: Visualisation of the allocation results
+
+```{r, eval=TRUE, fig.width=8, fig.height=10}
+pca_res_basal_p <- plot2D(res_basal_p, fcol = "markers_rep1", plot = FALSE)
+
+par(mfrow = c(3,2))
+par(mar = c(6, 6, 6, 2))
+prettyMap_overlay(pca_res_basal_p, res_basal_p, 
+                  main = "Basal: markers", 
+                  fcol = "markers_rep1")
+prettyMap_overlay(pca_res_basal_p, res_basal_p, 
+                  main = "Basal: bandle protein allocation", 
+                  fcol = "bandle.allocation_rep1")
+prettyMap_overlay(pca_res_basal_p, res_basal_p, 
+                  main = "Basal: 'low' outlier threshold", 
+                  fcol = "bandle.allocation_rep1.pred")
+prettyMap_overlay(pca_res_basal_p, res_basal_p, 
+                  main = "Basal: 'medium' outlier threshold", 
+                  fcol = "bandle.allocation_rep1.pred.pred")
+prettyMap_overlay(pca_res_basal_p, res_basal_p, 
+                  main = "Basal: 'high' outlier threshold", 
+                  fcol = "bandle.allocation_rep1.pred.pred.pred")
+
+plot(NULL, xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+addLegend(res_basal_p, fcol = "markers_rep1", where = "center", cex = 1, ncol = 2, y.intersp = 1.2)
+```
+
+
+## Insulin results
+
+```{r, eval=TRUE}
+## get proteins NOT used as markers
+insulin_un_msnset <- unknownMSnSet(res_insulin_p, fcol = "markers_rep1")
+
+## plot BANDLE allocation probability
+nt_prob_ins <- tapply(fData(insulin_un_msnset)[, "bandle.probability_rep1"], 
+             fData(insulin_un_msnset)[, "bandle.allocation_rep1"], 
+             summary)
+boxplot(nt_prob_ins, las = 2, main = "BANDLE probabilities by organelle")
+```
+
+The closer the outlier probability is to 1, the more likely it is we have
+outliers for that organelle class
+
+```{r, eval=TRUE}
+nt_out_ins <- tapply(fData(insulin_un_msnset)[, "bandle.outlier_rep1"], 
+                 fData(insulin_un_msnset)[, "bandle.allocation_rep1"], 
+                 summary)
+boxplot(nt_out_ins, las = 2, main = "BANDLE outlier component prob. by organelle")
+```
+
+
+Again, we create a new column where we invert outlier probability (so the closer
+the outlier probability is to 1, the more likely it is we have outliers for that
+organelle class). This allows us to use the `getPredictions` function to
+threshold on this value.
+
+```{r, eval=TRUE}
+## create a new column for the outlier probability
+fData(res_insulin_p)$outlier.prob <- 1 - fData(res_insulin_p)$bandle.outlier_rep1
+fData(insulin_un_msnset)$outlier.prob <- 1 - fData(insulin_un_msnset)$bandle.outlier_rep1
+
+## re-plot outlier probability (now the closer to 0 the more likely we have outliers for this class)
+nt_out_ins <- tapply(fData(insulin_un_msnset)[, "outlier.prob"], 
+                 fData(insulin_un_msnset)[, "bandle.allocation_rep1"], 
+                 summary)
+```
+
+### Thresholding on allocation probability only ("low confidence")
+
+Fist we threshold on allocation probability.
+<br>
+<br>
+`fcol:` name of the prediction column in the feature data  
+`scol:` name of the prediction score column  
+`mcol:` name of the feature meta data containing the labelled training data (doesn't have bandle allocation/probability scores)  
+`t:` the score threshold, everything with score <t are set to 'unknown'
+```{r, eval=TRUE}
+# here we set the allocation to "unknown" for all proteins where the allocation probability is <0.9)
+res_insulin_p <- getPredictions(res_insulin_p, 
+                     fcol = "bandle.allocation_rep1", 
+                     scol = "bandle.probability_rep1",
+                     mcol = "markers_rep1",
+                     t = 0.9)
+```
+
+### Thresholding on allocation and outlier probability ("high confidence")
+
+As the outlier probability varies a lot across organelles, we threshold each one
+individually, based on it's median outlier probability score.
+
+```{r, eval=FALSE}
+summary_df_ins <- data.frame(
+  Organelle = names(nt_out_ins),
+  Min = sapply(nt_out_ins, function(x) x["Min."]),
+  Q1 = sapply(nt_out_ins, function(x) x["1st Qu."]),
+  Median = sapply(nt_out_ins, function(x) x["Median"]),
+  Mean = sapply(nt_out_ins, function(x) x["Mean"]),
+  Q3 = sapply(nt_out_ins, function(x) x["3rd Qu."]),
+  Max = sapply(nt_out_ins, function(x) x["Max."]),
+  row.names = NULL
+)
+print(summary_df_ins)
+```
+
+```{r, eval=TRUE}
+# if median outlier prob = 0 (highest chance of having outliers) then threshold = 0.5, else threshold = 0
+## so in organelles with a high chance of having outliers, we remove allocations from proteins in these organelles which have a >50% chance of being an outlier.
+### proteins allocated to Nucleus with an outlier probability of <0.5 are changed to "unknown"
+t_user_ins <- c(0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0)
+names(t_user_ins) <- c(getMarkerClasses(res_insulin_p, fcol = "markers_rep1"), "unknown")
+res_insulin_p <- getPredictions(res_insulin_p, 
+                     fcol = "bandle.allocation_rep1.pred", 
+                     scol = "outlier.prob",
+                     mcol = "markers_rep1",
+                     t = t_user_ins)
+```
+
+```{r, eval=TRUE}
+# if median outlier prob = 0 then threshold = 1, else threshold = median
+## proteins allocated to an organelle with an outlier probability of <threshold are changed to "unknown"
+t_user_ins <- c(1, 1, 1, 1, 1, 1, 1, 0.9014, 1, 0.0372, 0)
+names(t_user_ins) <- c(getMarkerClasses(res_insulin_p, fcol = "markers_rep1"), "unknown")
+res_insulin_p <- getPredictions(res_insulin_p, 
+                     fcol = "bandle.allocation_rep1.pred.pred", 
+                     scol = "outlier.prob",
+                     mcol = "markers_rep1",
+                     t = t_user_ins)
+```
+
+### Insulin: Visualisation of the allocation results
+
+```{r, eval=TRUE, fig.width=8, fig.height=10}
+pca_res_insulin_p <- plot2D(res_insulin_p, fcol = "markers_rep1", plot = FALSE)
+
+par(mfrow = c(3, 2))
+par(mar = c(6, 6, 6, 2))
+prettyMap_overlay(pca_res_insulin_p, res_insulin_p, 
+                  main = "Insulin: markers", 
+                  fcol = "markers_rep1")
+prettyMap_overlay(pca_res_insulin_p, res_insulin_p, 
+                  main = "Insulin: bandle protein allocation", 
+                  fcol = "bandle.allocation_rep1")
+prettyMap_overlay(pca_res_insulin_p, res_insulin_p, 
+                  main = "Insulin: 'low' outlier threshold", 
+                  fcol = "bandle.allocation_rep1.pred")
+prettyMap_overlay(pca_res_insulin_p, res_insulin_p, 
+                  main = "Insulin: 'medium' outlier threshold", 
+                  fcol = "bandle.allocation_rep1.pred.pred")
+prettyMap_overlay(pca_res_insulin_p, res_insulin_p, 
+                  main = "Insulin: 'high' outlier threshold", 
+                  fcol = "bandle.allocation_rep1.pred.pred.pred")
+```
+
+<!-- # Save final MSnSet object for use in later notebooks -->
+<!-- ```{r, eval=FALSE} -->
+<!-- save(res_basal_p, res_insulin_p, -->
+<!--      file = here("output/adipocyte_lopit_allocations.rda")) -->
+<!-- ``` -->
+
+# Differential localisation
+
+The differential localisation probability tells us which proteins are most
+likely to *differentially localise*, and therefore exhibit a change in their
+steady-state subcellular location. The differential localisation probability is
+found in the `bandle.differential.localisation` column of the
+`bandleParams`output.
+
+```{r numtransloc, eval=TRUE}
+# extract all the diff loc probabilities
+pe1 <- summaries(bandle_output)[[1]]@posteriorEstimates
+pe2 <- summaries(bandle_output)[[2]]@posteriorEstimates
+diffloc_probs <- pe1$bandle.differential.localisation
+```
+
+```{r, eval=TRUE, fig.width=8, fig.height=6}
+par(mar = c(5, 5, 6, 2))
+plot(diffloc_probs[order(diffloc_probs, decreasing = TRUE)],
+     col = getStockcol()[2], pch = 1, 
+     ylab = "Differential localisation probability",
+     xlab = "Protein rank", 
+     main = "Differential localisation rank plot", 
+     xlim = c(0,3500), ylim = c(0,1))
+```
+
+We can examine the number of differentially localising proteins we have 
+according to probability. 
+
+```{r, eval=TRUE}
+# Define probability threshold
+thresholds <- c(1, .95, seq(.9, .1, by = -.1))
+
+# Count proteins meeting each threshold
+counts <- sapply(thresholds, function(threshold) sum(diffloc_probs >= threshold))
+
+# Print the result
+result_df <- data.frame(Threshold = thresholds, Count = counts)
+print(result_df)
+```
+
+## Candidates
+
+We define all proteins with a differential localisation probability = 1 as candidates.
+
+```{r}
+ind <- which(fData(res_basal_p)$bandle.differential.localisation_rep1 == 1)
+candidates <- featureNames(res_basal_p)[ind]
+print(candidates)
+```
+
+## Visualisation
+
+```{r}
+bandle_res_basal <- MSnSetList(list(res_basal_p[, 1:10],
+                                    res_basal_p[, 2:20],
+                                    res_basal_p[, 21:30])) 
+
+bandle_res_insulin <- MSnSetList(list(res_insulin_p[, 1:10],
+                                      res_insulin_p[, 2:20],
+                                      res_insulin_p[, 21:30])) 
+
+orgs <- c(union(getMarkerClasses(bandle_res_basal[[1]], "bandle.allocation_rep1.pred.pred.pred"), 
+                getMarkerClasses(bandle_res_insulin[[1]], "bandle.allocation_rep1.pred.pred.pred")))
+
+circos_cols <- c(getStockcol()[seq_along(orgs)], "grey")
+(colscheme <- setNames(circos_cols, c(orgs, "unknown"))) 
+
+subset_msnset <- list(bandle_res_basal[[1]][ind, ], 
+                      bandle_res_insulin[[1]][ind, ])
+```
+
+
+Chord diagram
+
+```{r, fig.width=10, fig.height=10}
+plotTranslocations(subset_msnset, fcol = "bandle.allocation_rep1.pred.pred.pred", col = colscheme, type = "chord")
+```
+
+Alluvial
+
+```{r, fig.height=11, fig.width=8}
+plotTranslocations(subset_msnset, fcol = "bandle.allocation_rep1.pred.pred.pred", col = colscheme, type = "alluvial")
+```
+
+
+Table
+
+```{r}
+plotTable(subset_msnset, fcol = "bandle.allocation_rep1.pred.pred.pred", all = TRUE)
+```
+
+ 
