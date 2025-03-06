@@ -1,4 +1,4 @@
-## Code used to generate the data in the manuscipt "Dynamic subcellular proteomics identifies novel regulators of adipocyte insulin action"
+## 3T3L1 adipocyte LOPIT 
 
 - This repository contains the code used for the computational analysis of "Dynamic
 subcellular proteomics identifies novel regulators of adipocyte insulin action",
