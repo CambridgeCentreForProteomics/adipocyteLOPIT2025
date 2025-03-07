@@ -6,7 +6,7 @@ submitted to BioRxiv 2025.
 
 - We performed LOPIT-DC in 3T3-L1 adipocytes (mouse
 adipocyte cell line) to determine changes in protein localisation in response to
-acute insulin and CL316,243 (B3-AR agonist) stimulation.
+acute insulin stimulation.
 
 ### Repository structure
 
