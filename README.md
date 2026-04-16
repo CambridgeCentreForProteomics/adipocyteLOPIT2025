@@ -1,8 +1,6 @@
-## Code repository for 3T3L1 adipocyte LOPIT 
+## Code repository for "Dynamic subcellular proteomics identifies regulators of adipocyte insulin action" 
 
-- This repository contains the code used for the computational analysis of "Dynamic
-subcellular proteomics identifies novel regulators of adipocyte insulin action",
-submitted to BioRxiv 2025. 
+- This repository contains the code used for the computational analysis of "Dynamic subcellular proteomics identifies novel regulators of adipocyte insulin action", published in Nature Communications 17, 3310 (2026). https://doi.org/10.1038/s41467-026-70116-9. Conway, O.J., Christopher, J.A., Breckels, L.M. et al. 
 
 - We performed LOPIT-DC in 3T3-L1 adipocytes (mouse
 adipocyte cell line) to determine changes in protein localisation in response to
